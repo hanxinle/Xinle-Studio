@@ -4,6 +4,7 @@
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidgetItem>
 #include <QVector>
 
 Player::Player(QWidget *parent) : QWidget(parent) {
@@ -55,18 +56,12 @@ Player::Player(QWidget *parent) : QWidget(parent) {
     effectLayout->setSpacing(8);
 
     effectLayout->addWidget(new QLabel(QStringLiteral("特效:"), this));
-    m_effectCombo = new QComboBox(this);
-    for (const EffectDef &def : m_effectRegistry.effects()) {
-        m_effectCombo->addItem(def.name);
-    }
-    effectLayout->addWidget(m_effectCombo);
-
-    effectLayout->addWidget(new QLabel(QStringLiteral("参数:"), this));
-    m_effectSlider = new QSlider(Qt::Horizontal, this);
-    m_effectSlider->setRange(0, 100);
-    m_effectSlider->setValue(0);
-    m_effectSlider->setEnabled(false);
-    effectLayout->addWidget(m_effectSlider, 1);
+    m_effectList = new QListWidget(this);
+    m_effectList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_effectList->setDragEnabled(true);
+    m_effectList->setAcceptDrops(true);
+    m_effectList->setDragDropMode(QAbstractItemView::InternalMove);
+    effectLayout->addWidget(m_effectList, 1);
 
     mainLayout->addLayout(effectLayout);
 
@@ -82,10 +77,8 @@ Player::Player(QWidget *parent) : QWidget(parent) {
 
     connect(m_openBtn, &QPushButton::clicked, this, &Player::onOpenFile);
     connect(m_playBtn, &QPushButton::clicked, this, &Player::onPlayPause);
-    connect(m_effectCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &Player::onEffectChanged);
-    connect(m_effectSlider, &QSlider::valueChanged, this,
-            &Player::onEffectParamChanged);
+    connect(m_effectList->model(), &QAbstractItemModel::rowsMoved, this,
+            &Player::onEffectOrderChanged);
     connect(m_progressSlider, &QSlider::sliderPressed, this,
             &Player::onProgressPressed);
     connect(m_progressSlider, &QSlider::sliderReleased, this,
@@ -93,10 +86,8 @@ Player::Player(QWidget *parent) : QWidget(parent) {
     connect(m_progressSlider, &QSlider::sliderMoved, this,
             &Player::onProgressMoved);
 
-    // 默认选中第一项（通常是“无”）。
-    if (m_effectCombo->count() > 0) {
-        m_effectCombo->setCurrentIndex(0);
-    }
+    // 初始化特效列表（每个特效自带复选框与滑块）。
+    initEffectControls();
 }
 
 Player::~Player() {
@@ -141,8 +132,8 @@ void Player::onOpenFile() {
                          : 33;
     m_videoTimer->start(intervalMs);
 
-    // 重新应用当前选中的特效。
-    onEffectChanged(m_effectCombo->currentIndex());
+    // 重新应用当前选中的特效链。
+    buildEffectChain();
 
     m_playBtn->setEnabled(true);
     m_playBtn->setText(QStringLiteral("播放"));
@@ -191,95 +182,217 @@ void Player::onDecodeError(const QString message) {
     qWarning() << "[Player] decode error:" << message;
 }
 
-void Player::onEffectChanged(int index) {
-    m_currentEffectIndex = index;
+void Player::initEffectControls() {
+    m_effectControls.clear();
 
-    if (index < 0 || index >= m_effectRegistry.effects().size()) {
-        m_glWidget->clearEffect();
-        m_effectSlider->setEnabled(false);
-        return;
-    }
-
-    const EffectDef &def = m_effectRegistry.effects()[index];
-
-    // 无特效。
-    if (def.frag.isEmpty()) {
-        m_glWidget->clearEffect();
-        m_effectSlider->setEnabled(false);
-        return;
-    }
-
-    // 加载 shader。
-    if (!m_glWidget->loadEffect(def.frag)) {
-        m_effectSlider->setEnabled(false);
-        return;
-    }
-
-    m_glWidget->setEffectIterations(def.iterations);
-
-    // 设置所有参数默认值。
-    QMap<QString, QVariant> params;
-    int firstFloatParamIndex = -1;
-    for (int i = 0; i < def.params.size(); ++i) {
-        const EffectParamDef &param = def.params[i];
-        params[param.name] = param.defaultValue;
-
-        if (firstFloatParamIndex < 0 && param.type == QStringLiteral("float")) {
-            firstFloatParamIndex = i;
+    for (int i = 0; i < m_effectRegistry.effects().size(); ++i) {
+        const EffectDef &def = m_effectRegistry.effects()[i];
+        if (def.frag.isEmpty()) {
+            continue;
         }
-    }
 
-    // 特殊 setup：遮罩。
-    if (def.setup == QStringLiteral("mask")) {
-        setupMaskEffect(params);
-    }
+        // 查找第一个 float 参数。
+        const EffectParamDef *floatParam = nullptr;
+        for (const EffectParamDef &param : def.params) {
+            if (param.type == QStringLiteral("float")) {
+                floatParam = &param;
+                break;
+            }
+        }
 
-    m_glWidget->setEffectParams(params);
+        auto *item = new QListWidgetItem();
+        item->setFlags(item->flags() | Qt::ItemIsEnabled |
+                       Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
+        item->setData(Qt::UserRole, i);
 
-    // 配置滑块绑定第一个 float 参数。
-    if (firstFloatParamIndex >= 0) {
-        const EffectParamDef &param = def.params[firstFloatParamIndex];
-        m_effectSlider->setRange(static_cast<int>(param.min),
-                                 static_cast<int>(param.max));
-        m_effectSlider->setValue(param.defaultValue.toInt());
-        m_effectSlider->setEnabled(true);
-    } else {
-        m_effectSlider->setEnabled(false);
+        auto *widget = new QWidget(m_effectList);
+        auto *layout = new QHBoxLayout(widget);
+        layout->setContentsMargins(4, 2, 4, 2);
+        layout->setSpacing(8);
+
+        auto *checkBox = new QCheckBox(def.name, widget);
+        auto *slider = new QSlider(Qt::Horizontal, widget);
+        if (floatParam) {
+            slider->setRange(static_cast<int>(floatParam->min),
+                              static_cast<int>(floatParam->max));
+            slider->setValue(floatParam->defaultValue.toInt());
+        }
+        slider->setEnabled(false);
+        slider->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+        layout->addWidget(checkBox);
+        layout->addWidget(slider, 1);
+
+        m_effectList->addItem(item);
+        m_effectList->setItemWidget(item, widget);
+        // 让 item 高度适应 widget。
+        item->setSizeHint(widget->sizeHint());
+
+        EffectControl ctrl;
+        ctrl.registryIndex = i;
+        ctrl.item = item;
+        ctrl.checkBox = checkBox;
+        ctrl.slider = slider;
+        if (floatParam) {
+            ctrl.paramName = floatParam->name;
+        }
+        m_effectControls.append(ctrl);
+
+        connect(checkBox, &QCheckBox::checkStateChanged, this,
+                &Player::onEffectCheckChanged);
+        connect(slider, &QSlider::valueChanged, this,
+                &Player::onEffectSliderChanged);
     }
 }
 
-void Player::onEffectParamChanged(int value) {
-    if (m_currentEffectIndex < 0 ||
-        m_currentEffectIndex >= m_effectRegistry.effects().size()) {
+void Player::onEffectCheckChanged(Qt::CheckState /*state*/) {
+    auto *checkBox = qobject_cast<QCheckBox *>(sender());
+    if (!checkBox) {
         return;
     }
 
-    const EffectDef &def = m_effectRegistry.effects()[m_currentEffectIndex];
-    applyEffectParams(value);
-}
-
-void Player::applyEffectParams(int sliderValue) {
-    if (m_currentEffectIndex < 0 ||
-        m_currentEffectIndex >= m_effectRegistry.effects().size()) {
-        return;
-    }
-
-    const EffectDef &def = m_effectRegistry.effects()[m_currentEffectIndex];
-
-    // 找到第一个 float 参数，用滑块值驱动。
-    for (const EffectParamDef &param : def.params) {
-        if (param.type == QStringLiteral("float")) {
-            m_glWidget->setEffectParam(param.name,
-                                       static_cast<float>(sliderValue));
+    // 找到对应的 EffectControl。
+    for (EffectControl &ctrl : m_effectControls) {
+        if (ctrl.checkBox == checkBox) {
+            ctrl.slider->setEnabled(checkBox->isChecked());
             break;
         }
     }
 
+    buildEffectChain();
+}
+
+void Player::onEffectSliderChanged(int value) {
+    auto *slider = qobject_cast<QSlider *>(sender());
+    if (!slider) {
+        return;
+    }
+
+    const EffectControl *ctrl = nullptr;
+    for (const EffectControl &c : m_effectControls) {
+        if (c.slider == slider) {
+            ctrl = &c;
+            break;
+        }
+    }
+    if (!ctrl) {
+        return;
+    }
+
+    int row = m_effectList->row(ctrl->item);
+    if (row < 0) {
+        return;
+    }
+
+    updateEffectParam(row, value);
+}
+
+void Player::onEffectOrderChanged() {
+    buildEffectChain();
+}
+
+void Player::buildEffectChain() {
+    m_effectChain.clear();
+
+    for (int row = 0; row < m_effectList->count(); ++row) {
+        const EffectControl *ctrl = nullptr;
+        for (const EffectControl &c : m_effectControls) {
+            if (c.item == m_effectList->item(row)) {
+                ctrl = &c;
+                break;
+            }
+        }
+        if (!ctrl || !ctrl->checkBox->isChecked()) {
+            continue;
+        }
+
+        int registryIndex = ctrl->registryIndex;
+        if (registryIndex < 0 || registryIndex >= m_effectRegistry.effects().size()) {
+            continue;
+        }
+
+        const EffectDef &def = m_effectRegistry.effects()[registryIndex];
+        if (def.frag.isEmpty()) {
+            continue;
+        }
+
+        EffectInstance instance;
+        instance.name = def.name;
+        instance.fragPath = def.frag;
+        instance.iterations = qMax(1, def.iterations);
+
+        for (const EffectParamDef &param : def.params) {
+            instance.params[param.name] = param.defaultValue;
+        }
+
+        // 用滑块当前值覆盖第一个 float 参数默认值。
+        if (!ctrl->paramName.isEmpty() && ctrl->slider) {
+            instance.params[ctrl->paramName] =
+                static_cast<float>(ctrl->slider->value());
+        }
+
+        // 遮罩特殊初始化。
+        if (def.setup == QStringLiteral("mask")) {
+            setupMaskEffect(instance.params);
+            // 如果滑块有值，覆盖 mask_blur。
+            if (!ctrl->paramName.isEmpty() && ctrl->slider) {
+                instance.params[ctrl->paramName] =
+                    static_cast<float>(ctrl->slider->value());
+            }
+        }
+
+        m_effectChain.append(instance);
+    }
+
+    m_glWidget->setEffectChain(m_effectChain);
+}
+
+void Player::updateEffectParam(int row, int sliderValue) {
+    if (row < 0 || row >= m_effectControls.size()) {
+        return;
+    }
+
+    const EffectControl &ctrl = m_effectControls[row];
+    if (!ctrl.checkBox->isChecked() || ctrl.paramName.isEmpty()) {
+        return;
+    }
+
+    int chainIndex = chainIndexForListRow(row);
+    if (chainIndex < 0 || chainIndex >= m_effectChain.size()) {
+        return;
+    }
+
+    m_effectChain[chainIndex].params[ctrl.paramName] =
+        static_cast<float>(sliderValue);
+    m_glWidget->setEffectParam(chainIndex, ctrl.paramName,
+                               static_cast<float>(sliderValue));
+
     // 遮罩的羽化也随滑块变化。
+    const EffectDef &def = m_effectRegistry.effects()[ctrl.registryIndex];
     if (def.setup == QStringLiteral("mask")) {
-        m_glWidget->setEffectParam(QStringLiteral("mask_blur"),
+        m_effectChain[chainIndex].params[QStringLiteral("mask_blur")] =
+            static_cast<float>(sliderValue);
+        m_glWidget->setEffectParam(chainIndex, QStringLiteral("mask_blur"),
                                    static_cast<float>(sliderValue));
     }
+}
+
+int Player::chainIndexForListRow(int row) const {
+    int chainIndex = -1;
+    for (int i = 0; i <= row; ++i) {
+        QListWidgetItem *item = m_effectList->item(i);
+        const EffectControl *ctrl = nullptr;
+        for (const EffectControl &c : m_effectControls) {
+            if (c.item == item) {
+                ctrl = &c;
+                break;
+            }
+        }
+        if (ctrl && ctrl->checkBox->isChecked()) {
+            ++chainIndex;
+        }
+    }
+    return chainIndex;
 }
 
 void Player::onProgressPressed() {

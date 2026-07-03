@@ -10,7 +10,7 @@ GLWidget::GLWidget(QWidget *parent) : QOpenGLWidget(parent) {
 GLWidget::~GLWidget() {
     makeCurrent();
 
-    clearEffect();
+    clearEffects();
 
     if (m_passThroughProgram) {
         delete m_passThroughProgram;
@@ -60,47 +60,58 @@ void GLWidget::setVideoFrame(const QByteArray &rgbaData, int width,
     update();
 }
 
-bool GLWidget::loadEffect(const QString &fragPath) {
+void GLWidget::setEffectChain(const QVector<EffectInstance> &chain) {
+    makeCurrent();
+    clearEffects();
+
+    for (const EffectInstance &instance : chain) {
+        if (instance.fragPath.isEmpty()) {
+            continue;
+        }
+
+        Effect *effect = new Effect();
+        if (!effect->load(QStringLiteral(":/Player/shaders/common.vert"),
+                           instance.fragPath)) {
+            qWarning() << "[GLWidget] failed to load effect:" << instance.fragPath;
+            delete effect;
+            continue;
+        }
+
+        EffectRuntime runtime;
+        runtime.instance = instance;
+        runtime.effect = effect;
+        m_effectRuntimes.append(runtime);
+    }
+
+    update();
+}
+
+void GLWidget::clearEffects() {
     makeCurrent();
 
-    clearEffect();
-
-    Effect *effect = new Effect();
-    if (!effect->load(QStringLiteral(":/Player/shaders/common.vert"),
-                      fragPath)) {
-        qWarning() << "[GLWidget] failed to load effect:" << fragPath;
-        delete effect;
-        return false;
+    for (EffectRuntime &runtime : m_effectRuntimes) {
+        delete runtime.effect;
+        runtime.effect = nullptr;
     }
-
-    m_effect = effect;
-    m_effectParams.clear();
-    m_effectIterations = 1;
-
-    // 默认传入 resolution。
-    m_effect->setResolution(m_videoWidth, m_videoHeight);
-
-    update();
-    return true;
+    m_effectRuntimes.clear();
 }
 
-void GLWidget::clearEffect() {
-    if (m_effect) {
-        makeCurrent();
-        delete m_effect;
-        m_effect = nullptr;
+void GLWidget::setEffectParam(int index, const QString &name,
+                              const QVariant &value) {
+    if (index < 0 || index >= m_effectRuntimes.size()) {
+        return;
     }
-    m_effectParams.clear();
-    m_effectIterations = 1;
-}
 
-void GLWidget::setEffectParam(const QString &name, const QVariant &value) {
-    m_effectParams[name] = value;
+    m_effectRuntimes[index].instance.params[name] = value;
     update();
 }
 
-void GLWidget::setEffectParams(const QMap<QString, QVariant> &params) {
-    m_effectParams = params;
+void GLWidget::setEffectParams(int index, const QMap<QString, QVariant> &params) {
+    if (index < 0 || index >= m_effectRuntimes.size()) {
+        return;
+    }
+
+    m_effectRuntimes[index].instance.params = params;
     update();
 }
 
@@ -159,8 +170,8 @@ void GLWidget::paintGL() {
 
     uploadTexture();
 
-    if (m_effect && m_effect->isValid()) {
-        renderWithEffect();
+    if (hasEffects()) {
+        renderWithEffects();
     } else {
         renderPassThrough();
     }
@@ -280,7 +291,7 @@ void GLWidget::renderPassThrough() {
     m_passThroughProgram->release();
 }
 
-void GLWidget::renderWithEffect() {
+void GLWidget::renderWithEffects() {
     // 先保存窗口 viewport，FBO 渲染完成后再恢复。
     GLint viewport[4];
     glGetIntegerv(GL_VIEWPORT, viewport);
@@ -288,24 +299,31 @@ void GLWidget::renderWithEffect() {
     // 确保 FBO 尺寸与视频一致。
     recreateFbos();
 
-    GLuint sourceTexture = m_videoTexture;
     int srcFbo = 0;
     int dstFbo = 1;
 
-    // 第 0 遍：先把视频纹理拷贝到 FBO[0]。
-    renderTextureToFbo(sourceTexture, m_fbo[srcFbo], nullptr, 0);
+    // 第 0 遍：先把视频纹理拷贝到 FBO[0]，作为特效链的输入。
+    renderTextureToFbo(m_videoTexture, m_fbo[srcFbo], nullptr, 0);
 
-    // 特效多遍渲染：FBO[0] -> FBO[1] -> FBO[0] -> ...
-    for (int i = 0; i < m_effectIterations; ++i) {
-        m_effect->bind();
-        m_effect->setUniforms(m_effectParams);
-        m_effect->setResolution(m_videoWidth, m_videoHeight);
-        m_effect->setIteration(i);
+    // 按顺序执行特效链：FBO[0] -> FBO[1] -> FBO[0] -> ...
+    for (const EffectRuntime &runtime : m_effectRuntimes) {
+        Effect *effect = runtime.effect;
+        if (!effect || !effect->isValid()) {
+            continue;
+        }
 
-        renderTextureToFbo(m_fbo[srcFbo]->texture(), m_fbo[dstFbo], m_effect,
-                           i);
+        const int iterations = qMax(1, runtime.instance.iterations);
+        for (int i = 0; i < iterations; ++i) {
+            effect->bind();
+            effect->setUniforms(runtime.instance.params);
+            effect->setResolution(m_videoWidth, m_videoHeight);
+            effect->setIteration(i);
 
-        qSwap(srcFbo, dstFbo);
+            renderTextureToFbo(m_fbo[srcFbo]->texture(), m_fbo[dstFbo], effect,
+                               i);
+
+            qSwap(srcFbo, dstFbo);
+        }
     }
 
     // 恢复窗口 viewport 后再渲染到屏幕。
@@ -335,6 +353,7 @@ void GLWidget::renderTextureToScreen(GLuint texture) {
 void GLWidget::renderTextureToFbo(GLuint srcTexture,
                                   QOpenGLFramebufferObject *dstFbo,
                                   Effect *effect, int iteration) {
+    (void)iteration;
     dstFbo->bind();
     glViewport(0, 0, m_videoWidth, m_videoHeight);
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);

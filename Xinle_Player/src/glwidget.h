@@ -10,11 +10,25 @@
 #include <QMatrix4x4>
 #include <QOpenGLFunctions_3_3_Core>
 #include <QPixmap>
+#include <QVector>
 
 /**
- * @brief 基于现代 OpenGL 3.3 Core 的视频显示控件，支持 GLSL 特效。
+ * @brief 特效实例描述。
  *
- * 支持上传 RGBA 视频帧并在全屏四边形上渲染；可通过 loadEffect 加载任意 .frag 特效。
+ * 由调用方维护特效链的顺序、参数与迭代次数，GLWidget 据此加载并渲染。
+ */
+struct EffectInstance {
+    QString name;
+    QString fragPath;
+    QMap<QString, QVariant> params;
+    int iterations = 1;
+};
+
+/**
+ * @brief 基于现代 OpenGL 3.3 Core 的视频显示控件，支持 GLSL 特效链。
+ *
+ * 支持上传 RGBA 视频帧并在全屏四边形上渲染；可通过 setEffectChain 挂载多个 .frag 特效，
+ * 特效按链式顺序依次作用，前一特效的输出作为后一特效的输入。
  */
 class GLWidget : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
@@ -26,21 +40,17 @@ public:
     // 设置当前要显示的视频帧（RGBA 数据）。主线程调用。
     void setVideoFrame(const QByteArray &rgbaData, int width, int height);
 
-    // 加载/卸载特效。fragPath 可以是资源路径、绝对路径或相对路径。
-    bool loadEffect(const QString &fragPath);
-    void clearEffect();
-    bool hasEffect() const {
-        return m_effect != nullptr;
+    // 设置整个特效链，会重新加载所有 fragment shader。
+    void setEffectChain(const QVector<EffectInstance> &chain);
+    void clearEffects();
+
+    bool hasEffects() const {
+        return !m_effectRuntimes.isEmpty();
     }
 
-    // 设置特效 uniform 参数。支持 float/int/bool/QVector2D/3D/4D/QMatrix4x4。
-    void setEffectParam(const QString &name, const QVariant &value);
-    void setEffectParams(const QMap<QString, QVariant> &params);
-
-    // 设置特效迭代次数（如 boxblur 需要 2 次）。
-    void setEffectIterations(int iterations) {
-        m_effectIterations = qMax(1, iterations);
-    }
+    // 更新指定位置特效的 uniform 参数。
+    void setEffectParam(int index, const QString &name, const QVariant &value);
+    void setEffectParams(int index, const QMap<QString, QVariant> &params);
 
 protected:
     void initializeGL() override;
@@ -48,6 +58,11 @@ protected:
     void paintGL() override;
 
 private:
+    struct EffectRuntime {
+        EffectInstance instance;
+        Effect *effect = nullptr;
+    };
+
     void initQuadGeometry();
     bool loadPassThroughShader();
     void uploadTexture();
@@ -55,7 +70,7 @@ private:
     void drawFullscreenQuad();
 
     void renderPassThrough();
-    void renderWithEffect();
+    void renderWithEffects();
     void renderTextureToScreen(GLuint texture);
     void renderTextureToFbo(GLuint srcTexture, QOpenGLFramebufferObject *dstFbo,
                             Effect *effect, int iteration);
@@ -69,10 +84,8 @@ private:
 
     QOpenGLShaderProgram *m_passThroughProgram = nullptr;
 
-    Effect *m_effect = nullptr;
+    QVector<EffectRuntime> m_effectRuntimes;
     QOpenGLFramebufferObject *m_fbo[2] = {nullptr, nullptr};
-    QMap<QString, QVariant> m_effectParams;
-    int m_effectIterations = 1;
 
     QByteArray m_frameData;
     int m_videoWidth = 0;
