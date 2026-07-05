@@ -9,13 +9,13 @@ x64/
 *.opendb
 
 # 工业界化目录结构后的输出与中间目录
-Xinle_Player/bin/
-Xinle_Player/obj/
+Xinle_Studio/bin/
+Xinle_Studio/obj/
 
 # 第三方依赖（由 scripts/setup-deps.bat 从 deps/ 填充）
 deps/
-Xinle_Player/include/
-Xinle_Player/lib/
+Xinle_Studio/include/
+Xinle_Studio/lib/
 
 # 中间文件
 *.obj

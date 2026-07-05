@@ -10,7 +10,7 @@
 Player::Player(QWidget *parent) : QWidget(parent) {
     ui.setupUi(this);
 
-    setWindowTitle(QStringLiteral("Xinle Player"));
+    setWindowTitle(QStringLiteral("Xinle Studio"));
     resize(960, 640);
 
     // 加载特效配置。

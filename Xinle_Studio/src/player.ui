@@ -14,7 +14,7 @@
    </rect>
   </property>
   <property name="windowTitle" >
-   <string>Xinle Player</string>
+   <string>Xinle Studio</string>
   </property>$centralwidget$
  </widget>
  <layoutDefault spacing="6" margin="11" />

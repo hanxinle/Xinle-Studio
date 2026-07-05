@@ -1,4 +1,4 @@
-# Xinle_Player - 基于 Qt6 + FFmpeg + OpenGL 的本地视频播放器
+# Xinle Studio - 基于 Qt6 + FFmpeg + OpenGL 的本地视频播放器
 
 ## 概述
 
@@ -7,15 +7,15 @@
 与 olive 的主要差异：
 
 - olive 使用 Qt 5.12.1 + MSVC 2015 + **传统 OpenGL**（`glBegin/glEnd`、固定管线、内置 shader 变量）。
-- Xinle_Player 使用 Qt 6.9.1 + MSVC 2022 + **现代 OpenGL Core Profile**（VAO/VBO、`QOpenGLShaderProgram`、显式 vertex attribute）。
+- Xinle Studio 使用 Qt 6.9.1 + MSVC 2022 + **现代 OpenGL Core Profile**（VAO/VBO、`QOpenGLShaderProgram`、显式 vertex attribute）。
 - 音频输出从 olive 的 `QAudioOutput`（Qt 5）改为 `QAudioSink`（Qt 6）。
 - GLSL shader 语法从 `#version 120` 风格迁移到 `#version 330 core`。
 
 ## 项目结构
 
 ```
-Xinle_Player/                    # Visual Studio 工程目录
-├── Xinle_Player.vcxproj         # 工程文件
+Xinle_Studio/                    # Visual Studio 工程目录
+├── Xinle_Studio.vcxproj         # 工程文件
 ├── bin/                         # 编译输出（.exe、.dll、.pdb）
 ├── include/                     # 第三方头文件（由 scripts/setup-deps.bat 填充）
 ├── lib/                         # 第三方导入库（由 scripts/setup-deps.bat 填充）
@@ -42,10 +42,10 @@ Xinle_Player/                    # Visual Studio 工程目录
 
 1. 安装 **Qt 6.9.1 + MSVC 2022** 与 Qt VS Tools。
 2. 将 `ffmpeg-master-latest-win64-gpl-shared` 解压到仓库根目录的 `deps/` 下。
-3. 运行 `scripts/setup-deps.bat`，把 FFmpeg 头文件和导入库复制到 `Xinle_Player/include/` 和 `Xinle_Player/lib/`。
-4. 打开 `Xinle_Player.sln`，选择 Release|x64 编译。
+3. 运行 `scripts/setup-deps.bat`，把 FFmpeg 头文件和导入库复制到 `Xinle_Studio/include/` 和 `Xinle_Studio/lib/`。
+4. 打开 `Xinle_Studio.sln`，选择 Release|x64 编译。
 
-编译后的可执行文件位于 `Xinle_Player/bin/x64/Release/Xinle_Player.exe`，运行时所需 DLL 会通过 PostBuildEvent 自动从 `deps/ffmpeg-master-latest-win64-gpl-shared/bin` 拷贝到输出目录。
+编译后的可执行文件位于 `Xinle_Studio/bin/x64/Release/Xinle_Studio.exe`，运行时所需 DLL 会通过 PostBuildEvent 自动从 `deps/ffmpeg-master-latest-win64-gpl-shared/bin` 拷贝到输出目录。
 
 ## 架构流程
 
@@ -209,7 +209,7 @@ m_glWidget->setEffectIterations(1);
 
 ## 与 olive 的对应关系
 
-| 功能 | olive | Xinle_Player |
+| 功能 | olive | Xinle Studio |
 |-----|---------|--------|
 | 视频解码 | `rendering/cacher.cpp` | `src/videodecoder.cpp` |
 | 音频输出 | `QAudioOutput` | `QAudioSink` |
