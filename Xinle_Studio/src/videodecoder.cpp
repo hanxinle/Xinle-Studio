@@ -129,12 +129,51 @@ bool VideoDecoder::open(const QString &filePath) {
     return true;
 }
 
+bool VideoDecoder::grabFirstFrame(QByteArray &rgbaData, int &width,
+                                  int &height) {
+    if (!m_fmtCtx || !m_videoCodecCtx) {
+        return false;
+    }
+
+    bool got = false;
+    AVPacket packet;
+    // 逐包读到解出第一帧为止, 音频包直接丢弃。
+    while (av_read_frame(m_fmtCtx, &packet) >= 0) {
+        if (packet.stream_index == m_videoStreamIndex &&
+            avcodec_send_packet(m_videoCodecCtx, &packet) >= 0 &&
+            avcodec_receive_frame(m_videoCodecCtx, m_videoFrame) == 0) {
+            sws_scale(m_swsCtx, m_videoFrame->data, m_videoFrame->linesize, 0,
+                      m_height, m_rgbaFrame->data, m_rgbaFrame->linesize);
+            int bufferSize =
+                av_image_get_buffer_size(AV_PIX_FMT_RGBA, m_width, m_height, 1);
+            rgbaData = QByteArray(
+                reinterpret_cast<const char *>(m_rgbaBuffer), bufferSize);
+            width = m_width;
+            height = m_height;
+            av_frame_unref(m_videoFrame);
+            got = true;
+        }
+        av_packet_unref(&packet);
+        if (got) {
+            break;
+        }
+    }
+
+    // 回到文件头并清空解码器内部状态, 保证正式播放从头开始。
+    avformat_seek_file(m_fmtCtx, -1, INT64_MIN, 0, INT64_MAX, 0);
+    flushVideoDecoder();
+    flushAudioDecoder();
+    return got;
+}
+
 void VideoDecoder::close() {
-    requestInterruption();
     {
         QMutexLocker lock(&m_stateMutex);
         m_playing = false;
         m_running = false;
+        // 清掉遗留的 seek 请求, 避免新文件打开后跳到旧目标位置。
+        m_seekRequested = false;
+        m_audioClockBase = 0.0;
     }
     wait(2000);
 
@@ -293,7 +332,9 @@ void VideoDecoder::run() {
     AVPacket packet;
     bool hasPendingPacket = false;
 
-    while (!isInterruptionRequested()) {
+    // 用 m_running 判断退出, 不用 QThread 中断标志: 中断标志在
+    // start() 重启后不会自动清除, 重新打开文件时线程会立刻退出。
+    for (;;) {
         {
             QMutexLocker lock(&m_stateMutex);
             if (!m_running) {

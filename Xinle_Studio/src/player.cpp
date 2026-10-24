@@ -133,6 +133,14 @@ void Player::onOpenFile() {
 
     m_videoTimer->start();
 
+    // 解出第一帧作为封面, 不用点播放即可预览。
+    QByteArray coverData;
+    int coverWidth = 0;
+    int coverHeight = 0;
+    if (m_decoder->grabFirstFrame(coverData, coverWidth, coverHeight)) {
+        m_glWidget->setVideoFrame(coverData, coverWidth, coverHeight);
+    }
+
     // 重新应用当前选中的特效链。
     buildEffectChain();
 

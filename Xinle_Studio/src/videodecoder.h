@@ -34,6 +34,9 @@ public:
     // 打开本地视频文件。
     bool open(const QString &filePath);
 
+    // 同步解码出第一帧作为封面(仅在线程未启动时调用), 完成后复位到文件头。
+    bool grabFirstFrame(QByteArray &rgbaData, int &width, int &height);
+
     // 关闭并释放资源。
     void close();
 
