@@ -216,6 +216,8 @@ void VideoDecoder::seek(double seconds) {
     m_seekRequested = true;
     m_seekTarget = qMax(0.0, seconds);
     m_currentPosition = m_seekTarget;
+    // 声卡重置后 processedUSecs 归零, 主时钟从目标位置起算。
+    m_audioClockBase = m_seekTarget;
 }
 
 void VideoDecoder::resetAudioOutput() {
@@ -232,17 +234,54 @@ bool VideoDecoder::isPlaying() const {
     return m_playing;
 }
 
-bool VideoDecoder::getVideoFrame(QByteArray &rgbaData, int &width,
-                                 int &height) {
+double VideoDecoder::masterClock() const {
+    if (m_audioStreamIndex >= 0 && m_audioSink) {
+        // 音频主时钟: 基准 + 声卡实际已播放时长. suspend 期间 processedUSecs 停走, 天然支持暂停。
+        QMutexLocker lock(&m_stateMutex);
+        double base = m_audioClockBase;
+        lock.unlock();
+        return base +
+               static_cast<double>(m_audioSink->processedUSecs()) / 1000000.0;
+    }
+    // 无音频流, 用视频位置兜底。
+    return currentPosition();
+}
+
+bool VideoDecoder::getDisplayFrame(double masterSec, QByteArray &rgbaData,
+                                   int &width, int &height) {
     QMutexLocker lock(&m_frameQueueMutex);
     if (m_frameQueue.isEmpty()) {
         return false;
     }
-    VideoFrame frame = m_frameQueue.dequeue();
-    rgbaData = frame.rgbaData;
-    width = frame.width;
-    height = frame.height;
-    return true;
+
+    // 无音频流时退化为逐帧显示, 节奏由调用方定时器保证。
+    if (m_audioStreamIndex < 0 || !m_audioSink) {
+        VideoFrame frame = m_frameQueue.dequeue();
+        rgbaData = frame.rgbaData;
+        width = frame.width;
+        height = frame.height;
+        return true;
+    }
+
+    while (!m_frameQueue.isEmpty()) {
+        const VideoFrame &head = m_frameQueue.head();
+        if (head.pts > masterSec + 0.005) {
+            // 队头帧还没到显示时间, 等待。
+            return false;
+        }
+        if (head.pts < masterSec - 0.08) {
+            // 帧已严重过期, 丢弃并继续检查下一帧。
+            m_frameQueue.dequeue();
+            continue;
+        }
+        // 到点, 取出显示。
+        VideoFrame frame = m_frameQueue.dequeue();
+        rgbaData = frame.rgbaData;
+        width = frame.width;
+        height = frame.height;
+        return true;
+    }
+    return false;
 }
 
 int VideoDecoder::frameQueueSize() const {
@@ -297,7 +336,10 @@ void VideoDecoder::run() {
                 {
                     QMutexLocker stateLock(&m_stateMutex);
                     m_currentPosition = 0.0;
+                    m_audioClockBase = 0.0;
                 }
+                // 通知主线程重置声卡, 使 processedUSecs 与基准同时归零。
+                emit audioResetRequested();
                 continue;
             }
             hasPendingPacket = true;
@@ -341,11 +383,18 @@ bool VideoDecoder::decodeVideoPacket(const AVPacket *packet) {
         int bufferSize =
             av_image_get_buffer_size(AV_PIX_FMT_RGBA, m_width, m_height, 1);
 
+        // 帧时间戳换算成秒, 同步与进度显示共用。
+        double ptsSec = m_currentPosition;
+        if (m_videoFrame->pts != AV_NOPTS_VALUE && m_videoTimeBase.den > 0) {
+            ptsSec = av_q2d(m_videoTimeBase) * m_videoFrame->pts;
+        }
+
         VideoFrame frame;
         frame.rgbaData =
             QByteArray(reinterpret_cast<const char *>(m_rgbaBuffer), bufferSize);
         frame.width = m_width;
         frame.height = m_height;
+        frame.pts = ptsSec;
 
         {
             QMutexLocker lock(&m_frameQueueMutex);
@@ -353,10 +402,9 @@ bool VideoDecoder::decodeVideoPacket(const AVPacket *packet) {
         }
 
         // 根据帧时间戳更新当前播放位置。
-        if (m_videoFrame->pts != AV_NOPTS_VALUE &&
-            m_videoTimeBase.den > 0) {
+        {
             QMutexLocker stateLock(&m_stateMutex);
-            m_currentPosition = av_q2d(m_videoTimeBase) * m_videoFrame->pts;
+            m_currentPosition = ptsSec;
         }
 
         av_frame_unref(m_videoFrame);

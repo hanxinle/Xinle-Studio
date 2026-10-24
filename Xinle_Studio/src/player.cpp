@@ -69,10 +69,14 @@ Player::Player(QWidget *parent) : QWidget(parent) {
     m_decoder = new VideoDecoder(this);
     connect(m_decoder, &VideoDecoder::decodeError, this,
             &Player::onDecodeError);
+    // 循环播放回到开头时在主线程重置声卡(QAudioSink 属于主线程)。
+    connect(m_decoder, &VideoDecoder::audioResetRequested, this,
+            [this] { m_decoder->resetAudioOutput(); });
 
-    // 视频显示定时器。
+    // 视频显示定时器. 固定 10ms, 由解码器按音频主时钟决定取哪帧。
     m_videoTimer = new QTimer(this);
     m_videoTimer->setTimerType(Qt::PreciseTimer);
+    m_videoTimer->setInterval(10);
     connect(m_videoTimer, &QTimer::timeout, this, &Player::onVideoTimer);
 
     connect(m_openBtn, &QPushButton::clicked, this, &Player::onOpenFile);
@@ -127,10 +131,7 @@ void Player::onOpenFile() {
     m_progressSlider->setEnabled(durationMs > 0);
     updateTimeLabel(0.0, m_decoder->duration());
 
-    int intervalMs = m_decoder->frameRate() > 0.0
-                         ? static_cast<int>(1000.0 / m_decoder->frameRate())
-                         : 33;
-    m_videoTimer->start(intervalMs);
+    m_videoTimer->start();
 
     // 重新应用当前选中的特效链。
     buildEffectChain();
@@ -151,11 +152,7 @@ void Player::onPlayPause() {
     } else {
         m_decoder->play();
         if (!m_videoTimer->isActive()) {
-            int intervalMs =
-                m_decoder->frameRate() > 0.0
-                    ? static_cast<int>(1000.0 / m_decoder->frameRate())
-                    : 33;
-            m_videoTimer->start(intervalMs);
+            m_videoTimer->start();
         }
         m_playBtn->setText(QStringLiteral("暂停"));
     }
@@ -165,16 +162,19 @@ void Player::onVideoTimer() {
     QByteArray rgbaData;
     int width = 0;
     int height = 0;
-    if (m_decoder->getVideoFrame(rgbaData, width, height)) {
+    // 以音频主时钟决定显示哪一帧(太早等, 太晚丢)。
+    if (m_decoder->getDisplayFrame(m_decoder->masterClock(), rgbaData, width,
+                                   height)) {
         m_glWidget->setVideoFrame(rgbaData, width, height);
     }
 
     if (!m_seeking && m_decoder->duration() > 0.0) {
-        int positionMs =
-            static_cast<int>(m_decoder->currentPosition() * 1000.0);
+        // 进度条跟随主时钟, 比视频帧 pts 更平滑。
+        double position = m_decoder->masterClock();
+        int positionMs = static_cast<int>(position * 1000.0);
         m_progressSlider->setValue(
             qBound(0, positionMs, m_progressSlider->maximum()));
-        updateTimeLabel(m_decoder->currentPosition(), m_decoder->duration());
+        updateTimeLabel(position, m_decoder->duration());
     }
 }
 
@@ -408,6 +408,8 @@ void Player::onProgressReleased() {
 
     double seconds = static_cast<double>(m_progressSlider->value()) / 1000.0;
     m_decoder->seek(seconds);
+    // 清掉声卡里积压的旧音频, 否则 seek 后还会放几百毫秒旧声音。
+    m_decoder->resetAudioOutput();
     updateTimeLabel(seconds, m_decoder->duration());
 }
 

@@ -20,7 +20,9 @@ extern "C" {
 /**
  * @brief 基于 FFmpeg 7.x 的音视频解码器。
  *
- * 解码线程全速读取音视频包：音频直接写入 QAudioSink；视频帧压入队列，由调用方按帧率取出显示。
+ * 音视频同步采用音频主时钟方案: 音频写入 QAudioSink 由声卡匀速消费,
+ * 主时钟 = seek 基准 + QAudioSink::processedUSecs(); 视频帧带 pts 入队,
+ * 由调用方按主时钟取帧显示(太早等待, 太晚丢弃)。无音频流时退化为定时器节奏逐帧显示。
  */
 class VideoDecoder : public QThread {
     Q_OBJECT
@@ -46,8 +48,12 @@ public:
     // 当前是否正在播放。
     bool isPlaying() const;
 
-    // 从视频帧队列取出一帧。返回 false 表示队列为空。
-    bool getVideoFrame(QByteArray &rgbaData, int &width, int &height);
+    // 主时钟(秒): 有音频流时为音频播放位置, 否则为当前视频位置。
+    double masterClock() const;
+
+    // 按主时钟取一帧用于显示: 队头帧太早则返回 false 等待, 太晚则丢弃直到赶上。
+    bool getDisplayFrame(double masterSec, QByteArray &rgbaData, int &width,
+                         int &height);
 
     // 当前队列中的帧数。
     int frameQueueSize() const;
@@ -75,6 +81,9 @@ public:
 signals:
     void decodeError(const QString message);
 
+    // 播放到文件末尾循环回开头, 请求主线程重置音频输出(processedUSecs 归零)。
+    void audioResetRequested();
+
 protected:
     void run() override;
 
@@ -83,6 +92,7 @@ private:
         QByteArray rgbaData;
         int width = 0;
         int height = 0;
+        double pts = 0.0;  // 显示时间戳(秒), 用于音视频同步。
     };
 
     bool decodeVideoPacket(const AVPacket *packet);
@@ -136,5 +146,6 @@ private:
     bool m_seekRequested = false;
     double m_seekTarget = 0.0;
     double m_currentPosition = 0.0;
+    double m_audioClockBase = 0.0;  // 音频主时钟基准(秒), seek/循环后 processedUSecs 从这里起算。
     mutable QMutex m_stateMutex;
 };
